@@ -26,7 +26,8 @@ from clinicdesk_agent.scheduling.errors import AuthError
 def _cmd_init_db(settings: Settings, args: argparse.Namespace) -> int:
     desk = build_clinic_desk(settings)
     summary = seed_database(desk.db, seed=args.seed if args.seed is not None else settings.seed,
-                            today=settings.clinic_now().date(), days=args.days or settings.seed_days)
+                            today=settings.clinic_now().date(),
+                            days=args.days if args.days is not None else settings.seed_days)
     print(f"Database ready at {desk.db.path}")
     print(f"{summary.doctors} doctors, {summary.slots} slots ({summary.booked} pre-booked) "
           f"from {summary.first_day} to {summary.last_day}")
@@ -77,12 +78,23 @@ def _cmd_ui(settings: Settings, args: argparse.Namespace) -> int:
     return subprocess.call([sys.executable, "-m", "streamlit", "run", str(script)])
 
 
+def _positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number, got {raw!r}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="clinicdesk", description="Clinic front-desk scheduling assistant")
     sub = parser.add_subparsers(dest="command", required=True)
     init = sub.add_parser("init-db", help="create and seed the demo database (wipes existing demo data)")
-    init.add_argument("--seed", type=int, default=None)
-    init.add_argument("--days", type=int, default=None)
+    init.add_argument("--seed", type=int, default=None, help="random seed (default: CLINICDESK_SEED or 7)")
+    init.add_argument("--days", type=_positive_int, default=None,
+                      help="days of slots, starting tomorrow (default: CLINICDESK_SEED_DAYS or 14)")
     chat = sub.add_parser("chat", help="chat in the terminal")
     chat.add_argument("--handle", required=True)
     chat.add_argument("--register", action="store_true", help="create the patient handle first")
