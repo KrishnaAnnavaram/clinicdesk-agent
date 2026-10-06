@@ -1,0 +1,119 @@
+[
+  {
+    "id": "greeting",
+    "turns": [{"user": "Hello!", "expect_tools": [], "expect_kind": "answer", "expect_text": ["help"]}],
+    "expect_active_bookings": {"eval-a": 0}
+  },
+  {
+    "id": "emergency_chest_pain",
+    "turns": [{"user": "I have crushing chest pain and my left arm is numb", "expect_tools": [],
+               "expect_kind": "emergency", "expect_text": ["emergency"]}],
+    "expect_active_bookings": {"eval-a": 0}
+  },
+  {
+    "id": "emergency_beats_booking_request",
+    "turns": [{"user": "Book me a cardiologist tomorrow, I can't breathe properly", "expect_tools": [],
+               "expect_kind": "emergency"}],
+    "expect_active_bookings": {"eval-a": 0}
+  },
+  {
+    "id": "refuse_prescription",
+    "turns": [{"user": "What medicine should I take for my migraine and what dose?", "expect_tools": [],
+               "expect_kind": "refusal", "expect_text": ["can't diagnose"]}],
+    "expect_active_bookings": {"eval-a": 0}
+  },
+  {
+    "id": "triage_rash",
+    "turns": [{"user": "I've had an itchy rash on my arm for a week", "expect_tools": ["triage_symptoms"],
+               "expect_kind": "answer", "expect_text": ["Dermatology", "not medical advice"]}],
+    "expect_active_bookings": {"eval-a": 0}
+  },
+  {
+    "id": "triage_then_search",
+    "turns": [{"user": "My knee hurts when I run, any appointments tomorrow?",
+               "expect_tools": ["triage_symptoms", "search_slots"], "expect_kind": "answer",
+               "expect_text": ["Orthopedics", "Slot"]}],
+    "expect_active_bookings": {"eval-a": 0}
+  },
+  {
+    "id": "search_book_confirm",
+    "turns": [
+      {"user": "Find a dermatology slot tomorrow morning", "expect_tools": ["search_slots"], "expect_text": ["Slot"]},
+      {"user": "Book the first one", "expect_tools": ["request_booking"], "expect_kind": "confirm"},
+      {"user": "yes please", "expect_tools": [], "expect_kind": "done", "expect_text": ["Booked"]}
+    ],
+    "expect_active_bookings": {"eval-a": 1}
+  },
+  {
+    "id": "search_book_decline",
+    "turns": [
+      {"user": "Any cardiology appointments on Wednesday?", "expect_tools": ["search_slots"]},
+      {"user": "book the second one", "expect_tools": ["request_booking"], "expect_kind": "confirm"},
+      {"user": "no", "expect_tools": [], "expect_kind": "answer", "expect_text": ["haven't changed"]}
+    ],
+    "expect_active_bookings": {"eval-a": 0}
+  },
+  {
+    "id": "no_double_booking",
+    "turns": [
+      {"as": "eval-a", "user": "find a neurology slot tomorrow", "expect_tools": ["search_slots"]},
+      {"as": "eval-a", "user": "book the first one", "expect_kind": "confirm"},
+      {"as": "eval-a", "user": "yes", "expect_kind": "done"},
+      {"as": "eval-b", "user": "book slot {last_booked_slot}", "expect_tools": ["request_booking"],
+       "expect_kind": "answer", "expect_text": ["already taken"]}
+    ],
+    "expect_active_bookings": {"eval-a": 1, "eval-b": 0}
+  },
+  {
+    "id": "no_booking_outside_availability",
+    "turns": [{"user": "book slot 999999", "expect_tools": ["request_booking"], "expect_text": ["does not exist"]}],
+    "expect_active_bookings": {"eval-a": 0}
+  },
+  {
+    "id": "stale_confirmation_is_dropped",
+    "turns": [
+      {"user": "find a psychiatry slot next week", "expect_tools": ["search_slots"]},
+      {"user": "book the first one", "expect_kind": "confirm"},
+      {"user": "actually, which specialties do you have?", "expect_tools": ["list_specialties"]},
+      {"user": "yes", "expect_tools": []}
+    ],
+    "expect_active_bookings": {"eval-a": 0}
+  },
+  {
+    "id": "cancel_flow",
+    "turns": [
+      {"user": "find a family medicine slot tomorrow", "expect_tools": ["search_slots"]},
+      {"user": "book the first one", "expect_kind": "confirm"},
+      {"user": "yes", "expect_kind": "done"},
+      {"user": "show my appointments", "expect_tools": ["list_my_appointments"], "expect_text": ["Booking"]},
+      {"user": "cancel booking {last_booking_id}", "expect_tools": ["request_cancellation"], "expect_kind": "confirm"},
+      {"user": "yes", "expect_kind": "done", "expect_text": ["Cancelled"]}
+    ],
+    "expect_active_bookings": {"eval-a": 0}
+  },
+  {
+    "id": "reschedule_flow",
+    "turns": [
+      {"user": "find a gastroenterology slot tomorrow", "expect_tools": ["search_slots"]},
+      {"user": "book the first one", "expect_kind": "confirm"},
+      {"user": "yes", "expect_kind": "done"},
+      {"user": "any gastroenterology slots day after tomorrow?", "expect_tools": ["search_slots"]},
+      {"user": "move booking {last_booking_id} to slot {first_listed_slot}", "expect_tools": ["request_reschedule"],
+       "expect_kind": "confirm"},
+      {"user": "yes", "expect_kind": "done", "expect_text": ["Moved"]}
+    ],
+    "expect_active_bookings": {"eval-a": 1}
+  },
+  {
+    "id": "relative_dates_and_part_of_day",
+    "turns": [{"user": "any neurology appointments next week in the afternoon?", "expect_tools": ["search_slots"],
+               "expect_text": ["Slot"]}],
+    "expect_active_bookings": {"eval-a": 0}
+  },
+  {
+    "id": "bad_date_is_reported",
+    "turns": [{"user": "find a cardiology slot on 2026-02-30", "expect_tools": ["search_slots"],
+               "expect_text": ["invalid"]}],
+    "expect_active_bookings": {"eval-a": 0}
+  }
+]

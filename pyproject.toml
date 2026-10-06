@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clinicdesk-agent"
+version = "0.1.0"
+description = "Agentic clinic front desk: symptom triage, doctor lookup and appointment booking"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Krishna Annavaram" }]
+requires-python = ">=3.10"
+# The core (scheduling service, safety rules, orchestrator, offline model) is standard library only.
+dependencies = ["tzdata; sys_platform == 'win32'"]
+
+[project.optional-dependencies]
+openai = ["openai>=1.30"]
+ui = ["streamlit>=1.35"]
+env = ["python-dotenv>=1.0"]
+dev = ["pytest>=8", "ruff"]
+all = ["clinicdesk-agent[openai,ui,env]"]
+
+[project.scripts]
+clinicdesk = "clinicdesk_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+clinicdesk_agent = ["db/schema.sql", "evaluation/dialogues.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
