@@ -34,6 +34,11 @@
 > vocabulary are in [`docs/ste-style-guide.md`](docs/ste-style-guide.md). Each term in the
 > [Glossary](#21-glossary) has only one meaning.
 
+> [!WARNING]
+> Do not use clinicdesk-agent as a medical device or with real patient data. It is a demo with
+> synthetic data. It does not give medical advice or a diagnosis, and it has no compliance review.
+> In an emergency, call the local emergency number.
+
 ---
 
 clinicdesk-agent helps a patient find a specialty, find a free slot, and book, cancel or reschedule a booking. The main idea is simple: the model only proposes. It calls eight typed tools, and the code enforces each booking rule. A change to the database occurs only after an explicit confirmation from the patient. An offline model with no network and no key runs the same code paths as a hosted model.
