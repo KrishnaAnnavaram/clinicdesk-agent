@@ -71,6 +71,7 @@ This README is the **one location that explains all of clinicdesk-agent**. It gi
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one message](#42-the-life-cycle-of-one-message)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [Patient sign-in](#5-patient-sign-in)
 6. 🟢 [The safety screen](#6-the-safety-screen)
 7. 🟣 [The orchestrator](#7-the-orchestrator)
@@ -145,6 +146,30 @@ flowchart LR
 | Evaluation harness | `src/clinicdesk_agent/evaluation/harness.py`, `evaluation/dialogues.json` | Run 15 scripted dialogues and give a score |
 | User interfaces | `src/clinicdesk_agent/cli.py`, `ui/streamlit_app.py` | The `clinicdesk` command and the Streamlit chat app |
 
+The component map shows which component calls which component.
+
+```mermaid
+flowchart LR
+    UI["User interfaces<br/>cli.py, streamlit_app.py"] --> APP["Composition root<br/>app.py, build_clinic_desk"]
+    CFG["Settings<br/>config.py"] --> APP
+    UI --> REG["Patient registry<br/>patients.py"]
+    UI --> ORC["Orchestrator<br/>orchestrator.py"]
+    APP --> ORC
+    ORC --> SAF["Safety screen<br/>triage.py, disclaimers.py"]
+    ORC --> PRM["System prompt<br/>prompts.py"]
+    ORC --> MOD["Models<br/>offline.py, openai_adapter.py"]
+    ORC --> TB["Toolbox<br/>tools.py"]
+    TB --> SAF
+    TB --> DATES["Date resolver<br/>dates.py"]
+    TB --> BS["Booking service<br/>booking.py, slots.py"]
+    BS --> DB[("Database<br/>schema.sql, connection.py")]
+    REG --> DB
+    SEED["Demo data<br/>seed.py"] --> DB
+    UI --> EVAL["Evaluation harness<br/>harness.py"]
+    EVAL --> APP
+    EVAL --> SEED
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -187,6 +212,24 @@ clinicdesk-agent/
 ### 3.1 The model proposes and the code decides
 The model can only call the eight tools in `TOOL_SPECS`. The three proposal tools store a proposal and write nothing. Only `Toolbox.apply_pending` writes, and only the orchestrator calls it after a confirmation. The model cannot call `apply_pending`.
 
+```mermaid
+flowchart LR
+    subgraph MODEL["What the model can call"]
+        RT["5 read tools"]
+        PT["3 proposal tools<br/>request_booking, request_cancellation,<br/>request_reschedule"]
+    end
+    RT --> RO["Read-only connection"]
+    PT --> PA["PendingAction in the Session<br/>no write"]
+    PA --> CF{{"HUMAN<br/>yes in the next message,<br/>or the Confirm button"}}
+    CF --> AP["Orchestrator.confirm<br/>Toolbox.apply_pending"]
+    AP --> BS["BookingService<br/>book, cancel, reschedule"]
+    BS --> DB[("SQLite")]
+    RO --> DB
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class CF human
+```
+
 ### 3.2 The patient identity comes from sign-in, not from the model
 No tool has a `patient_id` argument. The toolbox takes the patient from the `Session`, which `PatientRegistry` makes at sign-in. The argument validation rejects each unknown key, so an injected `patient_id` gives `invalid_arguments`.
 
@@ -212,29 +255,73 @@ The schema stores a handle, a scrypt passcode hash and a creation time for each 
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    S["Sign-in (handle + passcode)"] --> M["Patient message"]
-    M --> RF{"Red flag?"}
-    RF -- "yes" --> EM["Emergency reply (model not called)"]
-    RF -- "no" --> PD{"Proposal in session?"}
-    PD -- "yes + 'yes'" --> AP["apply_pending: book, cancel or reschedule"]
-    PD -- "yes + 'no'" --> DC["Decline: proposal deleted"]
-    PD -- "yes + other text" --> DROP["Proposal deleted"]
-    PD -- "no" --> AR
+flowchart TD
+    CRED[/"Handle and passcode"/] --> SI["PatientRegistry<br/>authenticate or register"]
+    SI --> SES["Session<br/>patient_id, handle"]
+    MSG[/"Patient message"/] --> CUT["Strip, keep the first<br/>2000 characters"]
+    SES --> CUT
+    CUT --> RF{"screen_for_emergency:<br/>red flag?"}
+    RF -- "yes" --> EM[/"Emergency reply,<br/>model not called"/]
+    RF -- "no" --> PD{"Proposal in<br/>the session?"}
+    PD -- "confirm word" --> AP["Toolbox.apply_pending"]
+    PD -- "deny word" --> DC[/"Decline reply,<br/>proposal deleted"/]
+    PD -- "other text" --> DROP["Delete the proposal"]
+    PD -- "no proposal" --> AR
     DROP --> AR{"Advice request?"}
-    AR -- "yes" --> RE["Refusal (model not called)"]
-    AR -- "no" --> LOOP["Model loop (max CLINICDESK_MAX_TOOL_STEPS)"]
-    LOOP --> TB["Toolbox: validate, then run the tool"]
-    TB --> RD["Read tools (read-only connection)"]
-    TB --> PR["Proposal tools (store a proposal)"]
-    TB --> LOOP
-    LOOP --> RP["Reply + disclaimer after triage + 'Please confirm' line"]
-    AP --> BS["Booking service: BEGIN IMMEDIATE"]
-    BS --> DB[("SQLite")]
-    RD --> DB
+    AR -- "yes" --> RE[/"Refusal reply,<br/>model not called"/]
+    AR -- "no" --> LOOP["_run_model loop<br/>max CLINICDESK_MAX_TOOL_STEPS"]
+    LOOP <--> TB["Toolbox.execute<br/>read tools and proposal tools"]
+    TB --> DB
+    LOOP --> RP{"Proposal stored?"}
+    RP -- "no" --> ANS[/"Answer reply,<br/>disclaimer after triage"/]
+    RP -- "yes" --> HUM{{"HUMAN<br/>Patient reads the Please confirm line<br/>and replies yes or no"}}
+    HUM --> MSG
+    AP --> BS["BookingService<br/>BEGIN IMMEDIATE"]
+    BS --> DB[("SQLite<br/>slots, bookings")]
+    BS --> DONE[/"Done reply"/]
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUM human
 ```
 
 ### 4.2 The life cycle of one message
+
+Each message ends with one reply kind. The diagram shows the states of one message in `Orchestrator.handle` and the reply kind at the end.
+
+```mermaid
+stateDiagram-v2
+    state "Received" as Received
+    state "Proposal check" as PendingCheck
+    state "Advice check" as AdviceCheck
+    state "Model loop" as ModelLoop
+    state "answer" as Kanswer
+    state "emergency" as Kemergency
+    state "refusal" as Krefusal
+    state "confirm" as Kconfirm
+    state "done" as Kdone
+    state "error" as Kerror
+    [*] --> Received: handle(session, text)
+    Received --> Kanswer: empty after strip
+    Received --> Kemergency: red flag matches
+    Received --> PendingCheck: no red flag
+    PendingCheck --> Kdone: confirm word, change applied
+    PendingCheck --> Kerror: confirm word, change failed
+    PendingCheck --> Kanswer: deny word, proposal deleted
+    PendingCheck --> AdviceCheck: no proposal, or other text
+    AdviceCheck --> Krefusal: advice pattern matches
+    AdviceCheck --> ModelLoop: no match
+    ModelLoop --> ModelLoop: tool calls, step below the limit
+    ModelLoop --> Kemergency: triage_symptoms gives an emergency
+    ModelLoop --> Kerror: LLMError or step limit
+    ModelLoop --> Kanswer: text, no proposal
+    ModelLoop --> Kconfirm: text, proposal stored
+    Kanswer --> [*]
+    Kemergency --> [*]
+    Krefusal --> [*]
+    Kconfirm --> [*]
+    Kdone --> [*]
+    Kerror --> [*]
+```
 
 1. The patient completes the sign-in. The session gets the `patient_id` from the `patients` table.
 2. The patient sends a message. The orchestrator removes outer spaces and keeps the first 2000 characters.
@@ -250,6 +337,57 @@ flowchart TB
 12. If a proposal exists, the orchestrator adds a "Please confirm" line and sets the reply kind to `confirm`.
 13. The patient replies "yes". The booking service writes the change and the reply kind is `done`.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor P as Patient
+    participant CLI as clinicdesk chat
+    participant REG as PatientRegistry
+    participant ORC as Orchestrator
+    participant M as ChatModel
+    participant TB as Toolbox
+    participant BS as BookingService
+    participant DB as SQLite
+
+    P->>CLI: clinicdesk chat with a handle, then the passcode
+    CLI->>REG: authenticate(handle, passcode)
+    REG->>DB: SELECT passcode_hash, read-only
+    REG-->>CLI: Patient
+    CLI->>CLI: Session(patient_id, handle)
+    P->>CLI: I have heartburn, can I come in this week
+    CLI->>ORC: handle(session, text)
+    ORC->>ORC: screen_for_emergency, is_medical_advice_request
+    ORC->>M: complete(system prompt, history, 8 schemas)
+    M-->>ORC: tool call triage_symptoms
+    ORC->>TB: execute(session, call)
+    TB-->>ORC: Gastroenterology, disclaimer
+    ORC->>M: complete, with the tool result
+    M-->>ORC: tool call search_slots
+    ORC->>TB: execute(session, call)
+    TB->>DB: search_open_slots, read-only
+    TB-->>ORC: slots and resolved_dates
+    ORC->>M: complete, with the tool result
+    M-->>ORC: text, no tool call
+    ORC-->>CLI: Reply kind answer, disclaimer added
+    P->>CLI: book the first one
+    CLI->>ORC: handle(session, text)
+    ORC->>M: complete
+    M-->>ORC: tool call request_booking
+    ORC->>TB: execute, check the slot
+    TB->>TB: store PendingAction with an idempotency key
+    ORC-->>CLI: Reply kind confirm, Please confirm line
+    P->>CLI: yes
+    CLI->>ORC: handle(session, yes)
+    ORC->>TB: apply_pending(session)
+    TB->>BS: book(patient_id, slot_id, idempotency_key)
+    BS->>DB: BEGIN IMMEDIATE, conditional UPDATE, INSERT, COMMIT
+    BS-->>TB: Booking
+    ORC-->>CLI: Reply kind done
+    CLI-->>P: Booked, with the booking number
+```
+
 ---
 
 ## 5. Patient sign-in
@@ -259,6 +397,27 @@ flowchart TB
 | Input | Output |
 |---|---|
 | A handle and a passcode | A `Patient` (`patient_id`, `handle`) and a new `Session`, or an `AuthError` |
+
+```mermaid
+flowchart TD
+    IN[/"Handle and passcode"/] --> MODE{"Register or sign in?"}
+    MODE -- "register" --> NH["normalise_handle<br/>strip, lowercase, 3 to 32 characters"]
+    NH -- "not valid" --> AE[/"AuthError with the reason"/]
+    NH --> PL{"Passcode 6 characters<br/>or more?"}
+    PL -- "no" --> AE
+    PL -- "yes" --> EX{"Handle already in patients?<br/>BEGIN IMMEDIATE"}
+    EX -- "yes" --> AE
+    EX -- "no" --> HP["hash_passcode<br/>scrypt, random 16-byte salt"]
+    HP --> INS[("INSERT patients<br/>handle, passcode_hash, created_at")]
+    INS --> PAT[/"Patient"/]
+    MODE -- "sign in" --> NH2["normalise_handle"]
+    NH2 -- "not valid" --> AE2[/"AuthError<br/>invalid handle or passcode"/]
+    NH2 --> RD["SELECT patient_id, passcode_hash<br/>read-only connection"]
+    RD --> VP{"Row exists and<br/>verify_passcode with compare_digest?"}
+    VP -- "no" --> AE2
+    VP -- "yes" --> PAT
+    PAT --> SES[/"Session(patient_id, handle)"/]
+```
 
 **Procedure**
 
@@ -285,6 +444,27 @@ flowchart TB
 | Input | Output |
 |---|---|
 | The message text (or the `symptoms` argument of `triage_symptoms`) | A `RedFlag`, an advice-request flag, or a `TriageSuggestion` |
+
+```mermaid
+flowchart TD
+    subgraph ORC["Orchestrator.handle"]
+        MT[/"Message text"/] --> RF1{"screen_for_emergency<br/>9 RED_FLAGS, first match"}
+        RF1 -- "match" --> EM1[/"emergency_message"/]
+        RF1 -- "no match" --> ADV{"is_medical_advice_request<br/>_ADVICE_PATTERNS"}
+        ADV -- "match" --> REF[/"ADVICE_REFUSAL"/]
+        ADV -- "no match" --> TOM[/"To the model"/]
+    end
+    subgraph TRI["triage_symptoms tool"]
+        SY[/"symptoms argument"/] --> RF2{"screen_for_emergency"}
+        RF2 -- "match" --> EM2[/"emergency result"/]
+        RF2 -- "no match" --> KW["suggest_specialty<br/>keyword hits at the start of a word"]
+        KW --> ANY{"Any hit?"}
+        ANY -- "no" --> FM[/"Family Medicine,<br/>confident false"/]
+        ANY -- "yes" --> PED{"Pediatrics hit?"}
+        PED -- "yes" --> PE[/"Pediatrics"/]
+        PED -- "no" --> MAX[/"Most hits wins,<br/>other hits are alternatives"/]
+    end
+```
 
 **Procedure**
 
@@ -330,6 +510,31 @@ flowchart TB
 |---|---|
 | A `Session` and one message | A `Reply` with `text`, `kind`, `tools_called` and, after a confirmation, `result` |
 
+The diagram shows `_run_model`, the model loop after the screens in [4.1](#41-full-flow).
+
+```mermaid
+flowchart TD
+    SP["build_system_prompt<br/>clinic time, time zone, handle"] --> STEP{"Step below<br/>max_steps?"}
+    STEP -- "no" --> TMS["TOO_MANY_STEPS, kind error,<br/>proposal deleted"]
+    STEP -- "yes" --> MC["model.complete<br/>system prompt, history, 8 schemas"]
+    MC -- "LLMError" --> UN[/"UNAVAILABLE, kind error,<br/>proposal deleted"/]
+    MC --> TC{"Tool calls<br/>in the turn?"}
+    TC -- "no" --> TXT["Final text, kind answer"]
+    TC -- "yes" --> EXE["Toolbox.execute for each call,<br/>add the tool message to the history"]
+    EXE --> EMG{"triage_symptoms<br/>gives an emergency?"}
+    EMG -- "yes" --> EM[/"Emergency reply,<br/>proposal deleted"/]
+    EMG -- "no" --> STEP
+    TXT --> DIS{"triage_symptoms ran?"}
+    TMS --> DIS
+    DIS -- "yes" --> ADD["Add TRIAGE_DISCLAIMER"]
+    DIS -- "no" --> PEN
+    ADD --> PEN{"Proposal in the session<br/>and kind answer?"}
+    PEN -- "yes" --> CF["Add the Please confirm line,<br/>kind confirm"]
+    PEN -- "no" --> REM
+    CF --> REM["_remember and _trim<br/>last 24 messages"]
+    REM --> OUT[/"Reply"/]
+```
+
 **Procedure**
 
 1. `handle` cuts the message to 2000 characters. An empty message gives "Please type a message."
@@ -364,6 +569,20 @@ flowchart TB
 |---|---|
 | A list of neutral messages and the tool schemas | An `AssistantTurn` with text, tool calls or both |
 
+```mermaid
+flowchart LR
+    ENV[/"CLINICDESK_LLM_PROVIDER"/] --> BM{"build_model"}
+    BM -- "offline" --> RB["RuleBasedChatModel<br/>no network"]
+    BM -- "openai" --> OA["OpenAIChatModel"]
+    OA --> TW["_to_wire<br/>neutral to OpenAI format"]
+    TW --> API["chat.completions.create<br/>temperature 0, timeout 30 s"]
+    API -- "exception" --> LE[/"LLMError,<br/>class name only"/]
+    API --> PTA["parse_tool_arguments<br/>bad JSON gives None"]
+    PTA --> AT[/"AssistantTurn<br/>text, tool calls"/]
+    RB --> AT
+    TEST["ScriptedChatModel<br/>tests only"] --> AT
+```
+
 **The three model classes**
 
 | Class | Module | Use |
@@ -373,6 +592,32 @@ flowchart TB
 | `ScriptedChatModel` | `agent/llm.py` | Test double that gives pre-written turns and records each call |
 
 **Procedure of the offline model**
+
+```mermaid
+flowchart TD
+    IN[/"Neutral messages"/] --> TR{"Last messages<br/>are tool results?"}
+    TR -- "yes" --> FU{"triage result, and search words<br/>or a date phrase in the text?"}
+    FU -- "yes" --> SS1["search_slots with the<br/>suggested specialty"]
+    FU -- "no" --> CMP[/"Text composed<br/>from the results"/]
+    TR -- "no" --> G{"Greeting or help?"}
+    G -- "yes" --> H[/"Help text"/]
+    G -- "no" --> MA{"my appointments?"}
+    MA -- "yes" --> LMA["list_my_appointments"]
+    MA -- "no" --> MV{"move N to slot M?"}
+    MV -- "yes" --> RR["request_reschedule"]
+    MV -- "no" --> CN{"cancel N?"}
+    CN -- "yes" --> RC["request_cancellation"]
+    CN -- "cancel, no number" --> LMA
+    CN -- "no" --> BK{"book slot N,<br/>or an ordinal?"}
+    BK -- "yes" --> RQ["request_booking"]
+    BK -- "no" --> SPD{"Which specialties<br/>or which doctors?"}
+    SPD -- "yes" --> LS["list_specialties<br/>or find_doctors"]
+    SPD -- "no" --> SYM{"Symptom words, no named<br/>specialty or doctor?"}
+    SYM -- "yes" --> TS["triage_symptoms"]
+    SYM -- "no" --> SE{"Search words, specialty,<br/>doctor or date phrase?"}
+    SE -- "yes" --> SS["search_slots"]
+    SE -- "no" --> NC[/"Not understood, help text"/]
+```
 
 1. If the last messages are tool results, it composes a reply from them, or chains `triage_symptoms` to `search_slots`.
 2. It answers a greeting or "help" with the help text.
@@ -406,6 +651,25 @@ flowchart TB
 | Input | Output |
 |---|---|
 | A `Session` and a `ToolCall` | A JSON tool result with `"ok": true` or `"ok": false` and an `error` code |
+
+```mermaid
+flowchart TD
+    C[/"Session and ToolCall"/] --> SP{"Name in TOOL_SPECS?"}
+    SP -- "no" --> UT[/"unknown_tool,<br/>list of tool names"/]
+    SP -- "yes" --> J{"Arguments are<br/>a JSON object?"}
+    J -- "no" --> IA[/"invalid_arguments"/]
+    J -- "yes" --> UK{"Unknown key?"}
+    UK -- "yes" --> IA
+    UK -- "no" --> TY["Integer: int, no boolean, minimum, maximum<br/>String: strip, 300 characters, enum"]
+    TY -- "fails" --> IA
+    TY --> H["Tool handler"]
+    H -- "SchedulingError" --> SE[/"ok false, stable error code"/]
+    H --> K{"Tool kind"}
+    K -- "read" --> RO["db.reader<br/>mode=ro, query_only"]
+    K -- "proposal" --> PA["Check the slot or the own booking,<br/>store one PendingAction"]
+    RO --> OK[/"ok true result"/]
+    PA --> OK
+```
 
 **The eight tools**
 
@@ -463,6 +727,29 @@ flowchart TB
 |---|---|
 | A date phrase and today's date in clinic time | A `DateRange` (start and end, both inclusive), or `DateParseError` |
 
+```mermaid
+flowchart TD
+    P[/"Date phrase and today"/] --> N["Lowercase, single spaces,<br/>remove a final dot"]
+    N --> E{"Empty?"}
+    E -- "yes" --> ERR[/"DateParseError"/]
+    E -- "no" --> ISO{"YYYY-MM-DD?"}
+    ISO -- "yes" --> V{"Valid date?"}
+    V -- "no" --> ERR
+    V -- "yes" --> ONE[/"DateRange of one day"/]
+    ISO -- "no" --> REL{"today, tomorrow, tmrw,<br/>day after tomorrow?"}
+    REL -- "yes" --> ONE
+    REL -- "no" --> WK{"this week, next week,<br/>this weekend, next weekend?"}
+    WK -- "yes" --> RNG[/"DateRange of 1 to 7 days"/]
+    WK -- "no" --> IN{"in N days?"}
+    IN -- "yes" --> ONE
+    IN -- "no" --> WD{"Weekday with<br/>this, next or on?"}
+    WD -- "yes" --> ONE
+    WD -- "no" --> MD{"Month and day?"}
+    MD -- "yes" --> ONE
+    MD -- "no" --> ERR
+    ERR --> INV[/"search_slots gives invalid_date"/]
+```
+
 **Accepted date phrases**
 
 | Phrase | Result |
@@ -501,6 +788,30 @@ flowchart TB
 |---|---|
 | A `patient_id` from the session and a slot id or a booking id | A `Booking`, or a typed `SchedulingError` |
 
+The diagram shows `book`. An error at any step rolls back the transaction.
+
+```mermaid
+flowchart TD
+    IN[/"patient_id, slot_id,<br/>idempotency_key"/] --> W["db.writer<br/>BEGIN IMMEDIATE"]
+    W --> IK{"Idempotency key<br/>already used?"}
+    IK -- "same patient and slot" --> RET[/"The first booking"/]
+    IK -- "different patient or slot" --> IC[/"idempotency_conflict"/]
+    IK -- "no" --> LIM{"Upcoming active bookings<br/>at the limit?"}
+    LIM -- "yes" --> BL[/"booking_limit_reached"/]
+    LIM -- "no" --> SL{"Slot exists?"}
+    SL -- "no" --> SNF[/"slot_not_found"/]
+    SL -- "yes" --> PAST{"Slot starts after<br/>the clock time?"}
+    PAST -- "no" --> SIP[/"slot_in_past"/]
+    PAST -- "yes" --> CL{"Active booking of the patient<br/>at the same start time?"}
+    CL -- "yes" --> PC[/"patient_time_conflict"/]
+    CL -- "no" --> UPD["UPDATE slots SET is_booked = 1<br/>WHERE slot_id = ? AND is_booked = 0"]
+    UPD --> RC{"One row changed?"}
+    RC -- "no" --> SU[/"slot_unavailable"/]
+    RC -- "yes" --> INS["INSERT bookings<br/>status active, idempotency key"]
+    INS --> COM[("COMMIT<br/>slots, bookings")]
+    COM --> OUT[/"Booking"/]
+```
+
 **Procedure of `book`**
 
 1. Open a write connection and start `BEGIN IMMEDIATE`.
@@ -519,7 +830,51 @@ flowchart TB
 4. For `reschedule`, claim the new slot first, then cancel the old booking and release its slot.
 5. For `reschedule`, insert a new active booking. The new booking has a new `booking_id`.
 
+```mermaid
+stateDiagram-v2
+    [*] --> active: book inserts the row, or reschedule inserts a new row
+    active --> cancelled: cancel, or reschedule to a different slot
+    cancelled --> [*]
+    note right of active: slots.is_booked = 1 for the slot
+    note right of cancelled: cancelled_at set, slots.is_booked = 0
+```
+
 **Database tables**
+
+```mermaid
+erDiagram
+    doctors ||--o{ slots : "publishes"
+    slots ||--o{ bookings : "is held by"
+    patients ||--o{ bookings : "makes"
+    doctors {
+        INTEGER doctor_id PK
+        TEXT name UK
+        TEXT specialty
+    }
+    slots {
+        INTEGER slot_id PK
+        INTEGER doctor_id FK
+        TEXT start_at
+        INTEGER duration_min
+        INTEGER is_booked
+        INTEGER version
+    }
+    patients {
+        INTEGER patient_id PK
+        TEXT handle UK
+        TEXT passcode_hash
+        TEXT created_at
+    }
+    bookings {
+        INTEGER booking_id PK
+        INTEGER slot_id FK
+        INTEGER patient_id FK
+        TEXT status
+        TEXT idempotency_key UK
+        TEXT created_at
+        TEXT cancelled_at
+    }
+```
 
 | Table | Columns | Rules in the schema |
 |---|---|---|
@@ -554,6 +909,27 @@ flowchart TB
 |---|---|
 | A model factory and `dialogues.json` (15 dialogues) | A summary with pass count, three accuracy values and the invariant violations |
 
+```mermaid
+flowchart TD
+    D[/"Model factory and dialogues.json"/] --> TMP["TemporaryDirectory<br/>clinicdesk-eval-"]
+    TMP --> NEW["New SQLite file for the dialogue<br/>build_clinic_desk, clock 08:00"]
+    NEW --> SEED["seed_database<br/>seed 7, 10 days from 2026-01-05"]
+    SEED --> REG["Register each handle<br/>default eval-a"]
+    REG --> TURN["Fill the placeholders,<br/>Orchestrator.handle"]
+    TURN --> CMP["Compare expect_tools,<br/>expect_kind, expect_text"]
+    CMP --> MORE{"More turns?"}
+    MORE -- "yes" --> TURN
+    MORE -- "no" --> BC["Compare expect_active_bookings"]
+    BC --> INV["check_invariants"]
+    INV --> PASS{"No failure and<br/>no violation?"}
+    PASS -- "yes" --> P["Dialogue passed"]
+    PASS -- "no" --> F["Failure lines"]
+    P --> NXT{"More dialogues?"}
+    F --> NXT
+    NXT -- "yes" --> NEW
+    NXT -- "no" --> SUM[/"Summary: dialogues_passed,<br/>3 accuracy values, invariant_violations"/]
+```
+
 **Procedure**
 
 1. Make a temporary directory. For each dialogue, make a new SQLite file in it.
@@ -586,6 +962,27 @@ flowchart TB
 
 ### 13.1 The command line
 
+```mermaid
+flowchart TD
+    M["main: load_dotenv_if_present,<br/>parse the arguments"] --> S{"Settings.from_env<br/>valid?"}
+    S -- "no" --> X2[/"Configuration error, exit 2"/]
+    S -- "yes" --> CMD{"Command"}
+    CMD -- "init-db" --> I["seed_database,<br/>print the summary"]
+    I --> X0[/"exit 0"/]
+    CMD -- "chat" --> DBX{"Database file exists?"}
+    DBX -- "no" --> X1[/"exit 1"/]
+    DBX -- "yes" --> PW["getpass, then register<br/>or authenticate"]
+    PW -- "AuthError" --> X1
+    PW --> LP["Input loop: Orchestrator.handle<br/>until quit, exit or end of input"]
+    LP --> X0
+    CMD -- "eval" --> EV["run_evaluation, print JSON,<br/>write the --json file"]
+    EV --> AP{"All dialogues pass,<br/>no violation?"}
+    AP -- "yes" --> X0
+    AP -- "no" --> X1
+    CMD -- "ui" --> UI["python -m streamlit run<br/>ui/streamlit_app.py"]
+    UI --> XS[/"Streamlit exit code"/]
+```
+
 | Command | Arguments | What it does | Exit codes |
 |---|---|---|---|
 | `clinicdesk init-db` | `--seed N`, `--days N` (minimum 1) | Delete the demo data and seed the database | 0 |
@@ -596,6 +993,26 @@ flowchart TB
 A configuration error gives exit code 2 and the text "Configuration error: ...". In `chat`, type `quit` or `exit` to stop.
 
 ### 13.2 The Streamlit app
+
+```mermaid
+flowchart TD
+    ST["main: page config,<br/>safety caption"] --> D["_desk, st.cache_resource<br/>build_clinic_desk"]
+    D -- "ConfigError" --> CE[/"Configuration error"/]
+    D --> DBE{"Database file exists?"}
+    DBE -- "no" --> W[/"Run clinicdesk init-db"/]
+    DBE -- "yes" --> SS{"Session in<br/>st.session_state?"}
+    SS -- "no" --> SI["_sign_in<br/>Sign in or Register"]
+    SI --> SES["Store the Session,<br/>empty transcript, rerun"]
+    SS -- "yes" --> CH["_chat<br/>show the transcript"]
+    CH --> PEN{"session.pending set?"}
+    PEN -- "yes" --> BTN{{"HUMAN<br/>Confirm or Keep as is"}}
+    BTN -- "Confirm" --> CF["Orchestrator.confirm"]
+    BTN -- "Keep as is" --> DEC["Orchestrator.decline"]
+    CH --> IN["st.chat_input<br/>Orchestrator.handle"]
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class BTN human
+```
 
 1. The app reads the settings once and keeps one `ClinicDesk` object for the server process.
 2. If the database file does not exist, the app tells you to run `clinicdesk init-db`.
@@ -682,6 +1099,15 @@ cp .env.example .env            # optional: fill in only what you need
 ### 16.3 Run clinicdesk-agent
 
 Run the offline demo first. It needs no key and no network.
+
+```mermaid
+flowchart LR
+    INS["pip install -e .[dev]"] --> INIT["clinicdesk init-db<br/>seed the demo database"]
+    INIT --> REG["clinicdesk chat --register<br/>make a handle"]
+    REG --> CHAT["clinicdesk chat<br/>sign in again"]
+    INIT --> EVAL["clinicdesk eval<br/>15 dialogues"]
+    INIT --> UI["clinicdesk ui<br/>needs the ui extra"]
+```
 
 ```bash
 clinicdesk init-db                                  # 20 doctors, slots for 14 days from tomorrow
