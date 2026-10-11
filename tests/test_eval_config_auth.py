@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from clinicdesk_agent.agent.llm import AssistantTurn, ScriptedChatModel
-from clinicdesk_agent.agent.openai_adapter import OpenAIChatModel
+from clinicdesk_agent.agent.openai_adapter import OpenAIChatModel, parse_tool_arguments
 from clinicdesk_agent.app import build_model
 from clinicdesk_agent.agent.offline import RuleBasedChatModel
 from clinicdesk_agent.config import ConfigError, Settings
@@ -52,6 +52,21 @@ def test_invalid_settings(env):
 def test_api_key_not_in_repr():
     settings = Settings.from_env({"CLINICDESK_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "test-value-123"})
     assert "test-value-123" not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, {}),
+        ("", {}),
+        ('{"patient_note": "naïve 患者"}', {"patient_note": "naïve 患者"}),
+        ("{", None),
+        ("[]", None),
+        ("null", None),
+    ],
+)
+def test_parse_tool_arguments_handles_empty_unicode_and_non_object_values(raw, expected):
+    assert parse_tool_arguments(raw) == expected
 
 
 def test_openai_adapter_parses_tool_calls_with_fake_client():
